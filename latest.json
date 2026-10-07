@@ -1,6 +1,6 @@
 {
-  "version": "1.0.3",
-  "url": "https://github.com/snseopro/olympe-dictee/releases/download/v1.0.3/OlympeDictee.exe",
-  "notes": "Build 3",
-  "sha256": "7ae0192c69b508ef085d7d5d1b22069212c333248cdb0d84b6e96bd41e1c7359"
+  "url": "https://github.com/snseopro/olympe-dictee/releases/download/v1.0.4/OlympeDictee.exe",
+  "sha256": "f5214eee0b74027a3095fde4e298c809a3e63190cacaec228cde3ad5c938f431",
+  "version": "1.0.4",
+  "notes": "Build 4"
 }
