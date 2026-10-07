@@ -51,16 +51,68 @@ def _envoyer_ctrl_v():
     u.keybd_event(VK_CONTROL, 0, KEYUP, 0)
 
 
-def coller_au_curseur(texte: str, restaurer: bool = True) -> bool:
-    """Colle `texte` dans le champ actif. Renvoie True si l'envoi a eu lieu."""
+def taper_texte(texte: str) -> bool:
+    """Tape le texte caractere par caractere (SendInput Unicode).
+
+    Marche la ou Ctrl+V est refuse (certaines apps Electron comme Discord).
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    KEYEVENTF_UNICODE = 0x0004
+    KEYEVENTF_KEYUP = 0x0002
+    INPUT_KEYBOARD = 1
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD),
+                    ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
+                    ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+    class _IU(ctypes.Union):
+        _fields_ = [("ki", KEYBDINPUT)]
+
+    class INPUT(ctypes.Structure):
+        _fields_ = [("type", wintypes.DWORD), ("u", _IU)]
+
+    u = ctypes.windll.user32
+
+    def _ev(scan, keyup):
+        flags = KEYEVENTF_UNICODE | (KEYEVENTF_KEYUP if keyup else 0)
+        return INPUT(type=INPUT_KEYBOARD,
+                     u=_IU(ki=KEYBDINPUT(0, scan, flags, 0, None)))
+
+    envois = []
+    for ch in texte:
+        code = ord(ch)
+        # les caracteres hors BMP sont rares ici ; on envoie l'unite de code.
+        envois.append(_ev(code, False))
+        envois.append(_ev(code, True))
+    if not envois:
+        return False
+    arr = (INPUT * len(envois))(*envois)
+    n = u.SendInput(len(envois), arr, ctypes.sizeof(INPUT))
+    log.info("Texte tape au curseur (%d/%d evenements)", n, len(envois))
+    return n > 0
+
+
+def coller_au_curseur(texte: str, methode: str = "coller", restaurer: bool = True) -> bool:
+    """Ecrit `texte` dans le champ actif. methode = 'coller' (Ctrl+V) ou 'taper'."""
     if not texte:
         return False
+
+    # Laisse le focus revenir a l'appli cible (on vient peut-etre du panneau).
+    time.sleep(0.18)
+
+    if methode == "taper":
+        try:
+            return taper_texte(texte)
+        except Exception as e:
+            log.error("Echec saisie clavier, repli sur Ctrl+V: %s", e)
+            # repli sur le collage
 
     ancien = _lire_presse_papiers() if restaurer else None
     if not _ecrire_presse_papiers(texte):
         return False
-    # Laisse le focus revenir a l'appli cible (on vient peut-etre du panneau).
-    time.sleep(0.12)
     try:
         _envoyer_ctrl_v()
         log.info("Colle au curseur (%d caracteres)", len(texte))
@@ -69,9 +121,8 @@ def coller_au_curseur(texte: str, restaurer: bool = True) -> bool:
         return False
 
     if restaurer and ancien is not None:
-        # Restaure apres un court delai (le collage doit avoir eu lieu).
         def _restaure():
-            time.sleep(0.4)
+            time.sleep(0.5)
             _ecrire_presse_papiers(ancien)
         import threading
         threading.Thread(target=_restaure, daemon=True).start()

@@ -23,6 +23,7 @@ DEFAUTS = {
     "raccourci_panneau": "ctrl+alt+o",       # ouvrir / masquer le panneau
     # Comportement
     "inserer_automatiquement": True,          # coller le texte au curseur apres dictee
+    "mode_saisie": "coller",                  # "coller" (Ctrl+V) ou "taper" (compatible Discord/Electron)
     "beep": True,                             # petit son au debut/fin d'enregistrement
     "demarrer_avec_windows": True,            # lancer l'app au demarrage de Windows
     "verifier_maj_au_demarrage": True,

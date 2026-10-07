@@ -141,6 +141,13 @@ class Reglages(QDialog):
         self.auto_inser = QCheckBox("Coller automatiquement au curseur apres dictee")
         self.auto_inser.setChecked(bool(cfg.get("inserer_automatiquement", True)))
         f.addRow(self.auto_inser)
+
+        self.mode = QComboBox()
+        self.mode.addItem("Coller (Ctrl+V) - rapide", "coller")
+        self.mode.addItem("Taper le texte - compatible Discord, jeux...", "taper")
+        pm = self.mode.findData(cfg.get("mode_saisie", "coller"))
+        self.mode.setCurrentIndex(pm if pm >= 0 else 0)
+        f.addRow("Mode de saisie :", self.mode)
         self.beep = QCheckBox("Petit son au debut/fin d'enregistrement")
         self.beep.setChecked(bool(cfg.get("beep", True)))
         f.addRow(self.beep)
@@ -165,6 +172,7 @@ class Reglages(QDialog):
         self.cfg["raccourci_dictee"] = self.rc_dictee.text().strip() or "ctrl+alt+space"
         self.cfg["raccourci_panneau"] = self.rc_panneau.text().strip() or "ctrl+alt+o"
         self.cfg["inserer_automatiquement"] = self.auto_inser.isChecked()
+        self.cfg["mode_saisie"] = self.mode.currentData() or "coller"
         self.cfg["beep"] = self.beep.isChecked()
         self.cfg["demarrer_avec_windows"] = self.autostart.isChecked()
         return self.cfg
@@ -295,7 +303,8 @@ class Panneau(QWidget):
         if not texte.strip():
             return
         self.hide()  # laisse le focus revenir a l'appli precedente
-        QTimer.singleShot(350, lambda: inject.coller_au_curseur(texte))
+        mode = self.appli.cfg.get("mode_saisie", "coller")
+        QTimer.singleShot(350, lambda: inject.coller_au_curseur(texte, mode))
         self.statut("Insere au curseur.")
 
     def statut(self, s: str):
@@ -552,7 +561,7 @@ class AppDictee(QObject):
                                   self.icone_idle, 3000)
             return
         if self.cfg.get("inserer_automatiquement", True):
-            inject.coller_au_curseur(texte)
+            inject.coller_au_curseur(texte, self.cfg.get("mode_saisie", "coller"))
         else:
             inject._ecrire_presse_papiers(texte)
             self.tray.showMessage(APP_NOM, "Texte copie (colle avec Ctrl+V).",
