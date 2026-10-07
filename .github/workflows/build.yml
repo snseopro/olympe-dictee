@@ -1,0 +1,75 @@
+name: build-windows
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - 'latest.json'
+      - 'README.md'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installer les dependances
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Numeroter la version (1.0.RUN)
+        shell: pwsh
+        run: |
+          $v = "1.0.$env:GITHUB_RUN_NUMBER"
+          (Get-Content app/version.py) -replace '"1\.0\.0"', "`"$v`"" | Set-Content app/version.py
+          echo "VERSION=$v" >> $env:GITHUB_ENV
+          Write-Host "Version = $v"
+
+      - name: Build PyInstaller (.exe)
+        run: >
+          pyinstaller --noconfirm --onefile --windowed --name OlympeDictee
+          --collect-all sounddevice
+          --hidden-import win32clipboard
+          --hidden-import win32con
+          run.py
+
+      - name: Empreinte SHA256
+        shell: pwsh
+        run: |
+          $h = (Get-FileHash dist/OlympeDictee.exe -Algorithm SHA256).Hash.ToLower()
+          echo "SHA256=$h" >> $env:GITHUB_ENV
+          Write-Host "sha256 = $h"
+
+      - name: Publier la release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: Olympe Dictee v${{ env.VERSION }}
+          files: dist/OlympeDictee.exe
+          fail_on_unmatched_files: true
+
+      - name: Mettre a jour latest.json
+        shell: pwsh
+        run: |
+          $url = "https://github.com/${{ github.repository }}/releases/download/v${{ env.VERSION }}/OlympeDictee.exe"
+          $json = @{
+            version = "${{ env.VERSION }}"
+            url     = $url
+            sha256  = "${{ env.SHA256 }}"
+            notes   = "Build ${{ github.run_number }}"
+          } | ConvertTo-Json
+          Set-Content -Path latest.json -Value $json -Encoding utf8
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add latest.json
+          git commit -m "maj latest.json v${{ env.VERSION }} [skip ci]"
+          git push

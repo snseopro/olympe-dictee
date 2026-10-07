@@ -1,0 +1,488 @@
+"""Olympe Dictee - app Windows en arriere-plan.
+
+- Raccourci global : dicter la ou est le curseur (transcription + correction IA).
+- Panneau : dicter dans une zone, donner du contexte, reformuler/raccourcir/
+  resumer, copier/inserer.
+- Bouton "Mettre a jour" : self-update depuis GitHub (aucune reinstallation).
+"""
+from __future__ import annotations
+import logging
+import sys
+import threading
+
+from PySide6.QtCore import QObject, Signal, Qt, QRunnable, QThreadPool, QTimer
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap, QBrush
+from PySide6.QtWidgets import (
+    QApplication, QSystemTrayIcon, QMenu, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QPlainTextEdit, QLineEdit, QLabel, QDialog, QFormLayout,
+    QComboBox, QCheckBox, QMessageBox, QProgressDialog,
+)
+
+from . import config as cfg_mod
+from . import audio, inject, groq_client, updater
+from .logging_setup import init_logs
+from .version import __version__, APP_NOM
+
+log = logging.getLogger("main")
+
+
+# ----------------------------------------------------------------------------
+# Taches asynchrones (reseau) -> resultat livre sur le thread principal.
+# ----------------------------------------------------------------------------
+class SignauxTache(QObject):
+    ok = Signal(object)
+    err = Signal(str)
+
+
+class Tache(QRunnable):
+    def __init__(self, fn, *a, **k):
+        super().__init__()
+        self.fn, self.a, self.k = fn, a, k
+        self.signaux = SignauxTache()
+
+    def run(self):
+        try:
+            self.signaux.ok.emit(self.fn(*self.a, **self.k))
+        except Exception as e:
+            log.exception("Tache echouee: %s", e)
+            self.signaux.err.emit(str(e))
+
+
+def lancer(fn, on_ok, on_err, *a, **k):
+    t = Tache(fn, *a, **k)
+    t.signaux.ok.connect(on_ok)
+    t.signaux.err.connect(on_err)
+    QThreadPool.globalInstance().start(t)
+
+
+# ----------------------------------------------------------------------------
+# Pont : les callbacks de raccourcis (thread "keyboard") emettent ces signaux,
+# recus sur le thread principal (connexion queued automatique).
+# ----------------------------------------------------------------------------
+class Pont(QObject):
+    dictee_curseur = Signal()
+    bascule_panneau = Signal()
+
+
+def _icone(couleur: str) -> QIcon:
+    pm = QPixmap(64, 64)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setBrush(QBrush(QColor(couleur)))
+    p.setPen(Qt.NoPen)
+    p.drawEllipse(8, 8, 48, 48)
+    # petit "micro" blanc
+    p.setBrush(QBrush(QColor("white")))
+    p.drawRoundedRect(27, 18, 10, 22, 5, 5)
+    p.drawRect(31, 40, 2, 8)
+    p.drawRect(24, 46, 16, 3)
+    p.end()
+    return QIcon(pm)
+
+
+def _beep(ok: bool, actif: bool):
+    if not actif:
+        return
+    try:
+        import winsound
+        winsound.Beep(880 if ok else 440, 120)
+    except Exception:
+        pass
+
+
+class Reglages(QDialog):
+    def __init__(self, cfg: dict, parent=None):
+        super().__init__(parent)
+        self.cfg = cfg
+        self.setWindowTitle("Reglages - " + APP_NOM)
+        self.setMinimumWidth(460)
+        f = QFormLayout(self)
+
+        self.cle = QLineEdit(cfg.get("groq_api_key", ""))
+        self.cle.setEchoMode(QLineEdit.Password)
+        self.cle.setPlaceholderText("gsk_...")
+        f.addRow("Cle Groq :", self.cle)
+
+        self.modele = QComboBox()
+        self.modele.addItems(["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"])
+        self.modele.setCurrentText(cfg.get("modele_texte", "openai/gpt-oss-120b"))
+        f.addRow("Modele texte :", self.modele)
+
+        self.rc_dictee = QLineEdit(cfg.get("raccourci_dictee", "ctrl+alt+space"))
+        f.addRow("Raccourci dictee :", self.rc_dictee)
+        self.rc_panneau = QLineEdit(cfg.get("raccourci_panneau", "ctrl+alt+o"))
+        f.addRow("Raccourci panneau :", self.rc_panneau)
+
+        self.auto_inser = QCheckBox("Coller automatiquement au curseur apres dictee")
+        self.auto_inser.setChecked(bool(cfg.get("inserer_automatiquement", True)))
+        f.addRow(self.auto_inser)
+        self.beep = QCheckBox("Petit son au debut/fin d'enregistrement")
+        self.beep.setChecked(bool(cfg.get("beep", True)))
+        f.addRow(self.beep)
+
+        lh = QHBoxLayout()
+        ok = QPushButton("Enregistrer")
+        ok.clicked.connect(self.accept)
+        an = QPushButton("Annuler")
+        an.clicked.connect(self.reject)
+        lh.addStretch(1)
+        lh.addWidget(an)
+        lh.addWidget(ok)
+        f.addRow(lh)
+
+    def valeurs(self) -> dict:
+        self.cfg["groq_api_key"] = self.cle.text().strip()
+        self.cfg["modele_texte"] = self.modele.currentText()
+        self.cfg["raccourci_dictee"] = self.rc_dictee.text().strip() or "ctrl+alt+space"
+        self.cfg["raccourci_panneau"] = self.rc_panneau.text().strip() or "ctrl+alt+o"
+        self.cfg["inserer_automatiquement"] = self.auto_inser.isChecked()
+        self.cfg["beep"] = self.beep.isChecked()
+        return self.cfg
+
+
+class Panneau(QWidget):
+    def __init__(self, appli: "AppDictee"):
+        super().__init__()
+        self.appli = appli
+        self.setWindowTitle(APP_NOM)
+        self.resize(560, 520)
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, False)
+        v = QVBoxLayout(self)
+
+        v.addWidget(QLabel("Zone de travail (dictee + transformations) :"))
+        self.zone = QPlainTextEdit()
+        self.zone.setPlaceholderText("Clique sur 'Dicter ici' et parle, ou colle du texte...")
+        v.addWidget(self.zone, 1)
+
+        lh_dict = QHBoxLayout()
+        self.btn_dicter = QPushButton("Dicter ici")
+        self.btn_dicter.clicked.connect(self.appli.toggle_dictee_panneau)
+        lh_dict.addWidget(self.btn_dicter)
+        self.lbl_etat = QLabel("")
+        lh_dict.addWidget(self.lbl_etat, 1)
+        v.addLayout(lh_dict)
+
+        v.addWidget(QLabel("Contexte (optionnel : colle un lien, des infos...) :"))
+        self.contexte = QPlainTextEdit()
+        self.contexte.setFixedHeight(60)
+        v.addWidget(self.contexte)
+
+        g = QHBoxLayout()
+        for libelle, action in [("Nettoyer", "nettoyer"), ("Reformuler pro", "reformuler_pro"),
+                                ("Raccourcir", "raccourcir"), ("Resume", "resume")]:
+            b = QPushButton(libelle)
+            b.clicked.connect(lambda _=False, a=action: self.appli.transformer_zone(a))
+            g.addWidget(b)
+        v.addLayout(g)
+
+        gl = QHBoxLayout()
+        self.instr = QLineEdit()
+        self.instr.setPlaceholderText("Instruction libre (ex: traduis en anglais)...")
+        bl = QPushButton("Appliquer")
+        bl.clicked.connect(lambda: self.appli.transformer_zone("libre", self.instr.text()))
+        gl.addWidget(self.instr, 1)
+        gl.addWidget(bl)
+        v.addLayout(gl)
+
+        b = QHBoxLayout()
+        bc = QPushButton("Copier")
+        bc.clicked.connect(self.copier)
+        bi = QPushButton("Inserer au curseur")
+        bi.clicked.connect(self.inserer_au_curseur)
+        b.addWidget(bc)
+        b.addWidget(bi)
+        b.addStretch(1)
+        br = QPushButton("Reglages")
+        br.clicked.connect(self.appli.ouvrir_reglages)
+        bm = QPushButton("Mettre a jour")
+        bm.clicked.connect(self.appli.mettre_a_jour)
+        b.addWidget(br)
+        b.addWidget(bm)
+        v.addLayout(b)
+
+        self.lbl_statut = QLabel("Pret. v" + __version__)
+        self.lbl_statut.setStyleSheet("color:#888")
+        v.addWidget(self.lbl_statut)
+
+    def copier(self):
+        inject._ecrire_presse_papiers(self.zone.toPlainText())
+        self.statut("Texte copie dans le presse-papiers.")
+
+    def inserer_au_curseur(self):
+        texte = self.zone.toPlainText()
+        if not texte.strip():
+            return
+        self.hide()  # laisse le focus revenir a l'appli precedente
+        QTimer.singleShot(350, lambda: inject.coller_au_curseur(texte))
+        self.statut("Insere au curseur.")
+
+    def statut(self, s: str):
+        self.lbl_statut.setText(s)
+
+    def closeEvent(self, e):
+        # Fermer le panneau ne quitte pas l'app : on le masque.
+        e.ignore()
+        self.hide()
+
+
+class AppDictee(QObject):
+    def __init__(self, app: QApplication):
+        super().__init__()
+        self.app = app
+        self.cfg = cfg_mod.charger()
+        self.enregistreur = audio.Enregistreur()
+        self.mode = None  # None | "curseur" | "panneau"
+
+        self.icone_idle = _icone("#2E9FCE")
+        self.icone_rec = _icone("#E53935")
+
+        self.tray = QSystemTrayIcon(self.icone_idle)
+        self.tray.setToolTip(APP_NOM)
+        menu = QMenu()
+        a_pan = QAction("Ouvrir le panneau", self); a_pan.triggered.connect(self.afficher_panneau)
+        a_reg = QAction("Reglages", self); a_reg.triggered.connect(self.ouvrir_reglages)
+        a_maj = QAction("Mettre a jour", self); a_maj.triggered.connect(self.mettre_a_jour)
+        a_quit = QAction("Quitter", self); a_quit.triggered.connect(self.quitter)
+        for a in (a_pan, a_reg, a_maj):
+            menu.addAction(a)
+        menu.addSeparator(); menu.addAction(a_quit)
+        self.tray.setContextMenu(menu)
+        self.tray.activated.connect(self._tray_clic)
+        self.tray.show()
+
+        self.panneau = Panneau(self)
+
+        self.pont = Pont()
+        self.pont.dictee_curseur.connect(self.toggle_dictee_curseur)
+        self.pont.bascule_panneau.connect(self.bascule_panneau)
+        self._enregistrer_raccourcis()
+
+        if not self.cfg.get("groq_api_key"):
+            QTimer.singleShot(400, self._premier_lancement)
+        elif self.cfg.get("verifier_maj_au_demarrage", True):
+            QTimer.singleShot(2500, lambda: self.mettre_a_jour(silencieux=True))
+
+    # --- raccourcis globaux -------------------------------------------------
+    def _enregistrer_raccourcis(self):
+        try:
+            import keyboard
+            keyboard.unhook_all_hotkeys()
+            keyboard.add_hotkey(self.cfg["raccourci_dictee"],
+                                lambda: self.pont.dictee_curseur.emit())
+            keyboard.add_hotkey(self.cfg["raccourci_panneau"],
+                                lambda: self.pont.bascule_panneau.emit())
+            log.info("Raccourcis: dictee=%s, panneau=%s",
+                     self.cfg["raccourci_dictee"], self.cfg["raccourci_panneau"])
+        except Exception as e:
+            log.exception("Raccourcis globaux indisponibles: %s", e)
+            self.tray.showMessage(APP_NOM, "Raccourcis globaux indisponibles : "
+                                  "lance l'app en administrateur.", self.icone_idle, 5000)
+
+    # --- dictee au curseur --------------------------------------------------
+    def toggle_dictee_curseur(self):
+        if self.enregistreur.en_cours and self.mode == "curseur":
+            self._arreter_et_traiter(cible="curseur")
+        elif not self.enregistreur.en_cours:
+            self._demarrer("curseur")
+
+    def toggle_dictee_panneau(self):
+        if self.enregistreur.en_cours and self.mode == "panneau":
+            self._arreter_et_traiter(cible="panneau")
+        elif not self.enregistreur.en_cours:
+            self._demarrer("panneau")
+            self.panneau.btn_dicter.setText("Arreter")
+            self.panneau.lbl_etat.setText("Enregistrement...")
+
+    def _demarrer(self, mode):
+        if not self.cfg.get("groq_api_key"):
+            self._premier_lancement()
+            return
+        try:
+            self.enregistreur.demarrer()
+        except Exception as e:
+            self._erreur("Micro indisponible : " + str(e))
+            return
+        self.mode = mode
+        self.tray.setIcon(self.icone_rec)
+        self.tray.setToolTip(APP_NOM + " - enregistrement...")
+        _beep(True, self.cfg.get("beep", True))
+
+    def _arreter_et_traiter(self, cible):
+        wav = self.enregistreur.arreter()
+        self.mode = None
+        self.tray.setIcon(self.icone_idle)
+        self.tray.setToolTip(APP_NOM)
+        _beep(False, self.cfg.get("beep", True))
+        if cible == "panneau":
+            self.panneau.btn_dicter.setText("Dicter ici")
+            self.panneau.lbl_etat.setText("Transcription..." if wav else "Rien capte.")
+        if not wav:
+            return
+
+        def pipeline():
+            t = groq_client.transcrire(wav, self.cfg["groq_api_key"],
+                                       self.cfg["modele_stt"], self.cfg.get("langue", "fr"))
+            t = groq_client.transformer(t, "nettoyer", self.cfg["groq_api_key"],
+                                        self.cfg["modele_texte"])
+            return t
+
+        if cible == "curseur":
+            self.tray.setToolTip(APP_NOM + " - transcription...")
+            lancer(pipeline, self._dictee_curseur_prete, self._erreur)
+        else:
+            lancer(pipeline, self._dictee_panneau_prete, self._erreur)
+
+    def _dictee_curseur_prete(self, texte: str):
+        self.tray.setToolTip(APP_NOM)
+        if not texte:
+            return
+        if self.cfg.get("inserer_automatiquement", True):
+            inject.coller_au_curseur(texte)
+        else:
+            inject._ecrire_presse_papiers(texte)
+            self.tray.showMessage(APP_NOM, "Texte copie (colle avec Ctrl+V).",
+                                  self.icone_idle, 2500)
+
+    def _dictee_panneau_prete(self, texte: str):
+        self.panneau.lbl_etat.setText("")
+        if not texte:
+            return
+        cur = self.panneau.zone.toPlainText()
+        self.panneau.zone.setPlainText((cur + (" " if cur and not cur.endswith("\n") else "") + texte).strip())
+        self.afficher_panneau()
+
+    # --- transformations panneau -------------------------------------------
+    def transformer_zone(self, action: str, instr: str = ""):
+        texte = self.panneau.zone.toPlainText().strip()
+        if not texte:
+            return
+        if not self.cfg.get("groq_api_key"):
+            self._premier_lancement()
+            return
+        ctx = self.panneau.contexte.toPlainText()
+        self.panneau.statut("Traitement...")
+        lancer(groq_client.transformer,
+               lambda out: self._zone_transformee(out),
+               self._erreur,
+               texte, action, self.cfg["groq_api_key"], self.cfg["modele_texte"],
+               ctx, instr)
+
+    def _zone_transformee(self, out: str):
+        if out:
+            self.panneau.zone.setPlainText(out)
+        self.panneau.statut("Fait.")
+
+    # --- panneau / tray -----------------------------------------------------
+    def afficher_panneau(self):
+        self.panneau.show()
+        self.panneau.raise_()
+        self.panneau.activateWindow()
+
+    def bascule_panneau(self):
+        if self.panneau.isVisible():
+            self.panneau.hide()
+        else:
+            self.afficher_panneau()
+
+    def _tray_clic(self, raison):
+        if raison == QSystemTrayIcon.Trigger:
+            self.bascule_panneau()
+
+    # --- reglages / maj / erreurs ------------------------------------------
+    def ouvrir_reglages(self):
+        d = Reglages(dict(self.cfg))
+        if d.exec() == QDialog.Accepted:
+            self.cfg = d.valeurs()
+            cfg_mod.enregistrer(self.cfg)
+            self._enregistrer_raccourcis()
+            self.tray.showMessage(APP_NOM, "Reglages enregistres.", self.icone_idle, 2000)
+
+    def _premier_lancement(self):
+        QMessageBox.information(None, APP_NOM,
+            "Bienvenue. Colle ta cle Groq dans les reglages pour commencer.")
+        self.ouvrir_reglages()
+
+    def mettre_a_jour(self, silencieux: bool = False):
+        url = self.cfg.get("url_manifeste_maj", "")
+
+        def on_ok(man):
+            if not man:
+                if not silencieux:
+                    QMessageBox.information(None, APP_NOM, "Tu as deja la derniere version (v%s)." % __version__)
+                return
+            rep = QMessageBox.question(None, APP_NOM,
+                "Nouvelle version %s disponible.\n\n%s\n\nMettre a jour maintenant ?"
+                % (man.get("version"), man.get("notes", "")[:300]))
+            if rep != QMessageBox.Yes:
+                return
+            self._telecharger_maj(man)
+
+        def on_err(msg):
+            if not silencieux:
+                QMessageBox.warning(None, APP_NOM, "Verification impossible : " + msg)
+
+        lancer(updater.verifier, on_ok, on_err, url)
+
+    def _telecharger_maj(self, man):
+        # Barre indeterminee (0,0) : pas de mise a jour cross-thread de la valeur.
+        dlg = QProgressDialog("Telechargement de la mise a jour...", None, 0, 0)
+        dlg.setWindowTitle(APP_NOM)
+        dlg.setAutoClose(False)
+        dlg.setCancelButton(None)
+        dlg.show()
+
+        def on_ok(_):
+            dlg.close()
+            self.quitter()  # l'updater remplace l'exe puis relance
+
+        def on_err(msg):
+            dlg.close()
+            QMessageBox.warning(None, APP_NOM, "Mise a jour impossible : " + msg)
+
+        lancer(updater.telecharger_et_installer, on_ok, on_err, man, None)
+
+    def _erreur(self, msg: str):
+        self.tray.setIcon(self.icone_idle)
+        self.tray.setToolTip(APP_NOM)
+        self.panneau.statut("Erreur : " + msg)
+        self.tray.showMessage(APP_NOM, msg, self.icone_idle, 4000)
+        log.error("Erreur remontee a l'utilisateur: %s", msg)
+
+    def quitter(self):
+        try:
+            import keyboard
+            keyboard.unhook_all_hotkeys()
+        except Exception:
+            pass
+        self.tray.hide()
+        self.app.quit()
+
+
+def main():
+    init_logs()
+    # Instance unique (evite 2 jeux de raccourcis).
+    try:
+        import tempfile, os
+        verrou = os.path.join(tempfile.gettempdir(), "olympe_dictee.lock")
+        f = open(verrou, "w")
+        if sys.platform == "win32":
+            import msvcrt
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                log.info("Deja en cours d'execution, on quitte.")
+                return
+    except Exception:
+        pass
+
+    app = QApplication(sys.argv)
+    app.setApplicationName(APP_NOM)
+    app.setQuitOnLastWindowClosed(False)
+    _ = AppDictee(app)
+    log.info("App demarree, en attente.")
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
