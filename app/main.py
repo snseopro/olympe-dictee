@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import config as cfg_mod
-from . import audio, inject, groq_client, updater, hotkeys
+from . import audio, inject, groq_client, updater, hotkeys, integration
 from .logging_setup import init_logs
 from .version import __version__, APP_NOM
 
@@ -144,6 +144,9 @@ class Reglages(QDialog):
         self.beep = QCheckBox("Petit son au debut/fin d'enregistrement")
         self.beep.setChecked(bool(cfg.get("beep", True)))
         f.addRow(self.beep)
+        self.autostart = QCheckBox("Demarrer avec Windows")
+        self.autostart.setChecked(bool(cfg.get("demarrer_avec_windows", True)))
+        f.addRow(self.autostart)
 
         lh = QHBoxLayout()
         ok = QPushButton("Enregistrer")
@@ -163,6 +166,7 @@ class Reglages(QDialog):
         self.cfg["raccourci_panneau"] = self.rc_panneau.text().strip() or "ctrl+alt+o"
         self.cfg["inserer_automatiquement"] = self.auto_inser.isChecked()
         self.cfg["beep"] = self.beep.isChecked()
+        self.cfg["demarrer_avec_windows"] = self.autostart.isChecked()
         return self.cfg
 
 
@@ -372,10 +376,25 @@ class AppDictee(QObject):
         self._id_panneau = None
         self._enregistrer_raccourcis()
 
+        self._appliquer_integration()
+
         if not self.cfg.get("groq_api_key"):
             QTimer.singleShot(400, self._premier_lancement)
         elif self.cfg.get("verifier_maj_au_demarrage", True):
             QTimer.singleShot(2500, lambda: self.mettre_a_jour(silencieux=True))
+
+    def _appliquer_integration(self):
+        """Raccourci bureau + demarrage Windows (seulement en .exe installe)."""
+        if not integration.est_gelee():
+            return
+        try:
+            integration.creer_raccourci_bureau()
+            if self.cfg.get("demarrer_avec_windows", True):
+                integration.activer_autostart()
+            else:
+                integration.desactiver_autostart()
+        except Exception as e:
+            log.warning("Integration Windows: %s", e)
 
     # --- raccourcis globaux (natifs Windows) --------------------------------
     def _enregistrer_raccourcis(self):
@@ -580,6 +599,7 @@ class AppDictee(QObject):
             self.cfg = d.valeurs()
             cfg_mod.enregistrer(self.cfg)
             self._enregistrer_raccourcis()
+            self._appliquer_integration()
             self.tray.showMessage(APP_NOM, "Reglages enregistres.", self.icone_idle, 2000)
 
     def _premier_lancement(self):

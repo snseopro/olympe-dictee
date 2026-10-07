@@ -24,6 +24,7 @@ DEFAUTS = {
     # Comportement
     "inserer_automatiquement": True,          # coller le texte au curseur apres dictee
     "beep": True,                             # petit son au debut/fin d'enregistrement
+    "demarrer_avec_windows": True,            # lancer l'app au demarrage de Windows
     "verifier_maj_au_demarrage": True,
     # Mise a jour : manifeste distant (rempli au build CI)
     "url_manifeste_maj": "https://raw.githubusercontent.com/snseopro/olympe-dictee/main/latest.json",
