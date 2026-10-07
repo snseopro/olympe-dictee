@@ -399,6 +399,18 @@ class AppDictee(QObject):
     # --- raccourcis globaux (natifs Windows) --------------------------------
     def _enregistrer_raccourcis(self):
         self.gest.tout_retirer()
+        # Securite : un raccourci invalide (modificateur seul, vide) revient au defaut.
+        corrige = False
+        for cle, defaut in (("raccourci_dictee", "ctrl+alt+space"),
+                            ("raccourci_panneau", "ctrl+alt+o")):
+            mods, vk = hotkeys._parse(self.cfg.get(cle, ""))
+            if vk is None or mods == 0:
+                log.warning("Raccourci %s invalide (%r) -> defaut %s",
+                            cle, self.cfg.get(cle), defaut)
+                self.cfg[cle] = defaut
+                corrige = True
+        if corrige:
+            cfg_mod.enregistrer(self.cfg)
         self._id_dictee = self.gest.enregistrer(self.cfg["raccourci_dictee"])
         self._id_panneau = self.gest.enregistrer(self.cfg["raccourci_panneau"])
         if not self._id_dictee or not self._id_panneau:
