@@ -7,8 +7,10 @@
 """
 from __future__ import annotations
 import logging
+import platform
 import sys
 import threading
+import time
 
 from PySide6.QtCore import QObject, Signal, Qt, QRunnable, QThreadPool, QTimer
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap, QBrush
@@ -19,7 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import config as cfg_mod
-from . import audio, inject, groq_client, updater
+from . import audio, inject, groq_client, updater, hotkeys
 from .logging_setup import init_logs
 from .version import __version__, APP_NOM
 
@@ -258,10 +260,13 @@ class Panneau(QWidget):
         b.addWidget(bc)
         b.addWidget(bi)
         b.addStretch(1)
+        bd = QPushButton("Diagnostic")
+        bd.clicked.connect(self.appli.diagnostic)
         br = QPushButton("Reglages")
         br.clicked.connect(self.appli.ouvrir_reglages)
         bm = QPushButton("Mettre a jour")
         bm.clicked.connect(self.appli.mettre_a_jour)
+        b.addWidget(bd)
         b.addWidget(br)
         b.addWidget(bm)
         v.addLayout(b)
@@ -360,9 +365,11 @@ class AppDictee(QObject):
         self.timer_niveau.setInterval(60)
         self.timer_niveau.timeout.connect(self._maj_niveau)
 
-        self.pont = Pont()
-        self.pont.dictee_curseur.connect(self.toggle_dictee_curseur)
-        self.pont.bascule_panneau.connect(self.bascule_panneau)
+        self.gest = hotkeys.GestionnaireRaccourcis()
+        self.app.installNativeEventFilter(self.gest)
+        self.gest.active.connect(self._raccourci_active)
+        self._id_dictee = None
+        self._id_panneau = None
         self._enregistrer_raccourcis()
 
         if not self.cfg.get("groq_api_key"):
@@ -370,21 +377,76 @@ class AppDictee(QObject):
         elif self.cfg.get("verifier_maj_au_demarrage", True):
             QTimer.singleShot(2500, lambda: self.mettre_a_jour(silencieux=True))
 
-    # --- raccourcis globaux -------------------------------------------------
+    # --- raccourcis globaux (natifs Windows) --------------------------------
     def _enregistrer_raccourcis(self):
+        self.gest.tout_retirer()
+        self._id_dictee = self.gest.enregistrer(self.cfg["raccourci_dictee"])
+        self._id_panneau = self.gest.enregistrer(self.cfg["raccourci_panneau"])
+        if not self._id_dictee or not self._id_panneau:
+            self.tray.showMessage(
+                APP_NOM,
+                "Un raccourci n'a pas pu etre enregistre (deja pris par une autre "
+                "appli ?). Change-le dans Reglages.", self.icone_idle, 6000)
+        else:
+            self.tray.showMessage(
+                APP_NOM,
+                "Raccourcis actifs : %s = dicter, %s = panneau." %
+                (self.cfg["raccourci_dictee"], self.cfg["raccourci_panneau"]),
+                self.icone_idle, 4000)
+
+    def _raccourci_active(self, hk_id: int):
+        if hk_id == self._id_dictee:
+            self.toggle_dictee_curseur()
+        elif hk_id == self._id_panneau:
+            self.bascule_panneau()
+
+    # --- diagnostic (fait parler l'app, visible a l'ecran) ------------------
+    def diagnostic(self):
+        self.afficher_panneau()
+        lignes = [
+            "=== DIAGNOSTIC Olympe Dictee v%s ===" % __version__,
+            "Systeme    : %s" % platform.platform(),
+            "Cle Groq   : %s" % ("presente" if self.cfg.get("groq_api_key") else "ABSENTE (-> Reglages)"),
+            "Modele     : %s" % self.cfg.get("modele_texte"),
+            "Raccourcis : dictee=%s (id=%s), panneau=%s (id=%s)" % (
+                self.cfg.get("raccourci_dictee"), self._id_dictee,
+                self.cfg.get("raccourci_panneau"), self._id_panneau),
+        ]
         try:
-            import keyboard
-            keyboard.unhook_all_hotkeys()
-            keyboard.add_hotkey(self.cfg["raccourci_dictee"],
-                                lambda: self.pont.dictee_curseur.emit())
-            keyboard.add_hotkey(self.cfg["raccourci_panneau"],
-                                lambda: self.pont.bascule_panneau.emit())
-            log.info("Raccourcis: dictee=%s, panneau=%s",
-                     self.cfg["raccourci_dictee"], self.cfg["raccourci_panneau"])
+            mics = audio.lister_entrees()
+            lignes.append("Micros (%d) : %s" % (len(mics), ", ".join(n for _, n in mics[:6]) or "aucun"))
         except Exception as e:
-            log.exception("Raccourcis globaux indisponibles: %s", e)
-            self.tray.showMessage(APP_NOM, "Raccourcis globaux indisponibles : "
-                                  "lance l'app en administrateur.", self.icone_idle, 5000)
+            lignes.append("Micros     : erreur %s" % e)
+        if not self._id_dictee or not self._id_panneau:
+            lignes.append(">> ATTENTION : un raccourci global n'est PAS enregistre "
+                          "(deja pris par une autre appli ? change-le dans Reglages).")
+        lignes.append(">> Test de transformation IA en cours...")
+        self.panneau.zone.setPlainText("\n".join(lignes))
+        self.panneau.statut("Diagnostic...")
+
+        def test():
+            t0 = time.time()
+            out = groq_client.transformer(
+                "ceci est un test de diagnostic avec une fote", "nettoyer",
+                self.cfg.get("groq_api_key", ""), self.cfg.get("modele_texte"))
+            return (time.time() - t0, out)
+
+        def ok(r):
+            dt, out = r
+            txt = self.panneau.zone.toPlainText().replace(
+                ">> Test de transformation IA en cours...",
+                ">> Test IA OK en %.1fs : \"%s\"\n>> Tout fonctionne cote IA." % (dt, out))
+            self.panneau.zone.setPlainText(txt)
+            self.panneau.statut("Diagnostic termine.")
+
+        def err(msg):
+            txt = self.panneau.zone.toPlainText().replace(
+                ">> Test de transformation IA en cours...",
+                ">> Test IA ECHEC : %s\n>> (cle Groq ? connexion internet ?)" % msg)
+            self.panneau.zone.setPlainText(txt)
+            self.panneau.statut("Diagnostic : erreur.")
+
+        lancer(test, ok, err)
 
     # --- dictee au curseur --------------------------------------------------
     def toggle_dictee_curseur(self):
@@ -574,8 +636,7 @@ class AppDictee(QObject):
 
     def quitter(self):
         try:
-            import keyboard
-            keyboard.unhook_all_hotkeys()
+            self.gest.tout_retirer()
         except Exception:
             pass
         self.tray.hide()

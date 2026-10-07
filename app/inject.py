@@ -40,11 +40,21 @@ def _ecrire_presse_papiers(texte: str) -> bool:
         return False
 
 
+def _envoyer_ctrl_v():
+    """Simule Ctrl+V en natif (keybd_event) -> envoye au champ au premier plan."""
+    import ctypes
+    u = ctypes.windll.user32
+    VK_CONTROL, VK_V, KEYUP = 0x11, 0x56, 0x0002
+    u.keybd_event(VK_CONTROL, 0, 0, 0)
+    u.keybd_event(VK_V, 0, 0, 0)
+    u.keybd_event(VK_V, 0, KEYUP, 0)
+    u.keybd_event(VK_CONTROL, 0, KEYUP, 0)
+
+
 def coller_au_curseur(texte: str, restaurer: bool = True) -> bool:
     """Colle `texte` dans le champ actif. Renvoie True si l'envoi a eu lieu."""
     if not texte:
         return False
-    import keyboard
 
     ancien = _lire_presse_papiers() if restaurer else None
     if not _ecrire_presse_papiers(texte):
@@ -52,7 +62,7 @@ def coller_au_curseur(texte: str, restaurer: bool = True) -> bool:
     # Laisse le focus revenir a l'appli cible (on vient peut-etre du panneau).
     time.sleep(0.12)
     try:
-        keyboard.send("ctrl+v")
+        _envoyer_ctrl_v()
         log.info("Colle au curseur (%d caracteres)", len(texte))
     except Exception as e:
         log.error("Echec Ctrl+V: %s", e)

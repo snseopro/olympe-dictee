@@ -130,7 +130,7 @@ def transformer(texte: str, action: str, cle: str, modele: str,
     r = requests.post(URL_CHAT,
                       headers={"Authorization": f"Bearer {cle}",
                                "Content-Type": "application/json"},
-                      json=corps, timeout=120)
+                      json=corps, timeout=45)
     if r.status_code != 200:
         log.error("Chat echec %s: %s", r.status_code, r.text[:300])
         raise GroqErreur(f"Traitement refuse ({r.status_code}).")
