@@ -48,10 +48,23 @@ class Tache(QRunnable):
             self.signaux.err.emit(str(e))
 
 
+# ⚠ On garde une reference vivante aux taches en cours : sinon le wrapper Python
+# (et son QObject de signaux) est garbage-collecte des que lancer() retourne, et
+# l'emit part dans le vide -> aucun callback n'est appele. (piege PySide6 classique)
+_TACHES_VIVANTES = set()
+
+
 def lancer(fn, on_ok, on_err, *a, **k):
     t = Tache(fn, *a, **k)
+    _TACHES_VIVANTES.add(t)
+
+    def _fini(*_):
+        _TACHES_VIVANTES.discard(t)
+
     t.signaux.ok.connect(on_ok)
     t.signaux.err.connect(on_err)
+    t.signaux.ok.connect(_fini)
+    t.signaux.err.connect(_fini)
     QThreadPool.globalInstance().start(t)
 
 
@@ -514,6 +527,7 @@ class AppDictee(QObject):
 
     def mettre_a_jour(self, silencieux: bool = False):
         url = self.cfg.get("url_manifeste_maj", "")
+        log.info("Verification MAJ (silencieux=%s) depuis %s", silencieux, url)
 
         def on_ok(man):
             if not man:
