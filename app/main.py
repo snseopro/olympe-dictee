@@ -677,6 +677,13 @@ class AppDictee(QObject):
 
 def main():
     init_logs()
+    # Auto-installation dans un dossier stable au 1er lancement (depuis Downloads).
+    # -> le raccourci bureau, l'autostart et les MAJ pointent TOUS vers ce dossier,
+    #    plus de desynchronisation "la MAJ ne change pas l'icone".
+    if integration.est_gelee() and not integration.est_installe():
+        if integration.installer_et_relancer():
+            log.info("Relance depuis le dossier d'install, sortie de l'instance courante.")
+            return
     # Instance unique (evite 2 jeux de raccourcis).
     try:
         import tempfile, os

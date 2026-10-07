@@ -25,6 +25,48 @@ def est_gelee() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
+# --- Auto-installation dans un dossier STABLE -------------------------------
+# Sinon l'exe tourne depuis Downloads (ou ailleurs), la MAJ remplace un fichier
+# et le raccourci/autostart pointent vers une autre copie -> desynchronisation.
+def dossier_install() -> str:
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, APP_ID)
+
+
+def chemin_install_exe() -> str:
+    return os.path.join(dossier_install(), "OlympeDictee.exe")
+
+
+def est_installe() -> bool:
+    try:
+        return (os.path.normcase(os.path.abspath(_exe()))
+                == os.path.normcase(os.path.abspath(chemin_install_exe())))
+    except Exception:
+        return False
+
+
+def installer_et_relancer() -> bool:
+    """Copie l'exe dans le dossier d'install stable, lance la copie et
+    demande a l'instance courante de quitter. Renvoie True si on a relance."""
+    if not est_gelee() or est_installe():
+        return False
+    import shutil
+    dst = chemin_install_exe()
+    try:
+        os.makedirs(dossier_install(), exist_ok=True)
+        shutil.copy2(_exe(), dst)
+    except Exception as e:
+        log.error("Installation dans %s impossible: %s", dossier_install(), e)
+        return False
+    try:
+        subprocess.Popen([dst], creationflags=0x00000008)  # DETACHED_PROCESS
+    except Exception as e:
+        log.error("Lancement de la copie installee impossible: %s", e)
+        return False
+    log.info("Installe dans %s, l'instance courante va quitter.", dst)
+    return True
+
+
 def chemin_raccourci_bureau() -> str:
     bureau = os.path.join(os.path.expanduser("~"), "Desktop")
     # OneDrive déplace parfois le Bureau
