@@ -17,6 +17,7 @@ DEFAUTS = {
     "modele_texte": "openai/gpt-oss-120b",
     "modele_stt": "whisper-large-v3-turbo",
     "langue": "fr",
+    "peripherique_entree": "",  # "" = micro par defaut ; sinon index sounddevice
     # Raccourcis globaux (syntaxe de la lib "keyboard")
     "raccourci_dictee": "ctrl+alt+space",   # dicter la ou est le curseur
     "raccourci_panneau": "ctrl+alt+o",       # ouvrir / masquer le panneau

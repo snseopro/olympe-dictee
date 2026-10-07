@@ -47,6 +47,29 @@ class GroqErreur(Exception):
     pass
 
 
+# Phrases qu'un modele Whisper "hallucine" sur du silence / audio tres court
+# (credits de sous-titrage, incitations vues a l'entrainement).
+_HALLUCINATIONS = [
+    "sous-titrage", "sous-titres", "soustitreur", "amara.org",
+    "merci d'avoir regarde", "merci de votre attention", "abonnez-vous",
+    "n'oubliez pas de vous abonner", "radio-canada", "st' 501", "st 501",
+    "generique", "merci pour votre ecoute",
+]
+
+
+def _est_hallucination(texte: str) -> bool:
+    t = texte.lower().strip()
+    if not t:
+        return True
+    # court ET contient un motif d'hallucination -> on jette
+    if len(t) <= 60 and any(m in t for m in _HALLUCINATIONS):
+        return True
+    # cas ou toute la sortie n'est qu'un de ces credits
+    if any(t == m or t.startswith(m) for m in _HALLUCINATIONS):
+        return True
+    return False
+
+
 def transcrire(chemin_wav: str, cle: str, modele: str, langue: str = "fr") -> str:
     """Envoie le WAV a Whisper, renvoie le texte brut transcrit."""
     if not cle:
@@ -62,6 +85,9 @@ def transcrire(chemin_wav: str, cle: str, modele: str, langue: str = "fr") -> st
         log.error("STT echec %s: %s", r.status_code, r.text[:300])
         raise GroqErreur(f"Transcription refusee ({r.status_code}).")
     texte = r.text.strip()
+    if _est_hallucination(texte):
+        log.info("Transcription ignoree (hallucination Whisper): %r", texte[:80])
+        return ""
     log.info("Transcription OK (%d caracteres)", len(texte))
     return texte
 

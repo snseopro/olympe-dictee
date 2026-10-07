@@ -15,7 +15,7 @@ from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap, QBrush
 from PySide6.QtWidgets import (
     QApplication, QSystemTrayIcon, QMenu, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QPlainTextEdit, QLineEdit, QLabel, QDialog, QFormLayout,
-    QComboBox, QCheckBox, QMessageBox, QProgressDialog,
+    QComboBox, QCheckBox, QMessageBox, QProgressDialog, QProgressBar,
 )
 
 from . import config as cfg_mod
@@ -109,6 +109,15 @@ class Reglages(QDialog):
         self.modele.setCurrentText(cfg.get("modele_texte", "openai/gpt-oss-120b"))
         f.addRow("Modele texte :", self.modele)
 
+        self.micro = QComboBox()
+        self.micro.addItem("Micro par defaut", "")
+        for idx, nom in audio.lister_entrees():
+            self.micro.addItem(nom, str(idx))
+        cur = str(cfg.get("peripherique_entree", ""))
+        pos = self.micro.findData(cur)
+        self.micro.setCurrentIndex(pos if pos >= 0 else 0)
+        f.addRow("Micro :", self.micro)
+
         self.rc_dictee = QLineEdit(cfg.get("raccourci_dictee", "ctrl+alt+space"))
         f.addRow("Raccourci dictee :", self.rc_dictee)
         self.rc_panneau = QLineEdit(cfg.get("raccourci_panneau", "ctrl+alt+o"))
@@ -134,6 +143,7 @@ class Reglages(QDialog):
     def valeurs(self) -> dict:
         self.cfg["groq_api_key"] = self.cle.text().strip()
         self.cfg["modele_texte"] = self.modele.currentText()
+        self.cfg["peripherique_entree"] = self.micro.currentData() or ""
         self.cfg["raccourci_dictee"] = self.rc_dictee.text().strip() or "ctrl+alt+space"
         self.cfg["raccourci_panneau"] = self.rc_panneau.text().strip() or "ctrl+alt+o"
         self.cfg["inserer_automatiquement"] = self.auto_inser.isChecked()
@@ -141,54 +151,96 @@ class Reglages(QDialog):
         return self.cfg
 
 
+def _section(txt: str) -> QLabel:
+    lab = QLabel(txt)
+    lab.setObjectName("section")
+    return lab
+
+
 class Panneau(QWidget):
     def __init__(self, appli: "AppDictee"):
         super().__init__()
         self.appli = appli
         self.setWindowTitle(APP_NOM)
-        self.resize(560, 520)
-        self.setWindowFlag(Qt.WindowStaysOnTopHint, False)
+        self.resize(600, 600)
+        self.setMinimumSize(480, 520)
         v = QVBoxLayout(self)
+        v.setContentsMargins(20, 18, 20, 14)
+        v.setSpacing(11)
 
-        v.addWidget(QLabel("Zone de travail (dictee + transformations) :"))
+        # En-tete
+        titre = QLabel("Olympe Dictee")
+        titre.setObjectName("titre")
+        v.addWidget(titre)
+        sous = QLabel("Dictee vocale + correction IA")
+        sous.setObjectName("sous")
+        v.addWidget(sous)
+        v.addSpacing(6)
+
+        # Zone de travail
+        tete = QHBoxLayout()
+        tete.addWidget(_section("Zone de travail"))
+        tete.addStretch(1)
+        self.lbl_etat = QLabel("")
+        self.lbl_etat.setObjectName("sous")
+        tete.addWidget(self.lbl_etat)
+        v.addLayout(tete)
+
         self.zone = QPlainTextEdit()
         self.zone.setPlaceholderText("Clique sur 'Dicter ici' et parle, ou colle du texte...")
         v.addWidget(self.zone, 1)
 
-        lh_dict = QHBoxLayout()
-        self.btn_dicter = QPushButton("Dicter ici")
+        self.btn_dicter = QPushButton("  Dicter ici")
+        self.btn_dicter.setObjectName("primaire")
+        self.btn_dicter.setMinimumHeight(40)
         self.btn_dicter.clicked.connect(self.appli.toggle_dictee_panneau)
-        lh_dict.addWidget(self.btn_dicter)
-        self.lbl_etat = QLabel("")
-        lh_dict.addWidget(self.lbl_etat, 1)
-        v.addLayout(lh_dict)
+        v.addWidget(self.btn_dicter)
 
-        v.addWidget(QLabel("Contexte (optionnel : colle un lien, des infos...) :"))
+        # Indicateur de niveau de voix
+        self.vumetre = QProgressBar()
+        self.vumetre.setRange(0, 100)
+        self.vumetre.setTextVisible(False)
+        self.vumetre.setFixedHeight(7)
+        self.vumetre.setValue(0)
+        v.addWidget(self.vumetre)
+
+        # Contexte
+        v.addWidget(_section("Contexte (optionnel)"))
         self.contexte = QPlainTextEdit()
-        self.contexte.setFixedHeight(60)
+        self.contexte.setPlaceholderText("Colle un lien, des infos... pour aider l'IA")
+        self.contexte.setFixedHeight(56)
         v.addWidget(self.contexte)
 
+        # Transformations
+        v.addWidget(_section("Transformer"))
         g = QHBoxLayout()
+        g.setSpacing(8)
         for libelle, action in [("Nettoyer", "nettoyer"), ("Reformuler pro", "reformuler_pro"),
                                 ("Raccourcir", "raccourcir"), ("Resume", "resume")]:
             b = QPushButton(libelle)
+            b.setMinimumHeight(36)
             b.clicked.connect(lambda _=False, a=action: self.appli.transformer_zone(a))
             g.addWidget(b)
         v.addLayout(g)
 
         gl = QHBoxLayout()
+        gl.setSpacing(8)
         self.instr = QLineEdit()
-        self.instr.setPlaceholderText("Instruction libre (ex: traduis en anglais)...")
+        self.instr.setPlaceholderText("Instruction libre (ex : traduis en anglais)...")
         bl = QPushButton("Appliquer")
         bl.clicked.connect(lambda: self.appli.transformer_zone("libre", self.instr.text()))
         gl.addWidget(self.instr, 1)
         gl.addWidget(bl)
         v.addLayout(gl)
 
+        v.addSpacing(4)
+        # Actions sortie
         b = QHBoxLayout()
+        b.setSpacing(8)
         bc = QPushButton("Copier")
         bc.clicked.connect(self.copier)
         bi = QPushButton("Inserer au curseur")
+        bi.setObjectName("primaire")
         bi.clicked.connect(self.inserer_au_curseur)
         b.addWidget(bc)
         b.addWidget(bi)
@@ -201,9 +253,16 @@ class Panneau(QWidget):
         b.addWidget(bm)
         v.addLayout(b)
 
-        self.lbl_statut = QLabel("Pret. v" + __version__)
-        self.lbl_statut.setStyleSheet("color:#888")
+        self.lbl_statut = QLabel("Pret - v" + __version__)
+        self.lbl_statut.setObjectName("statut")
         v.addWidget(self.lbl_statut)
+
+    def set_rec(self, on: bool):
+        self.btn_dicter.setObjectName("rec" if on else "primaire")
+        self.btn_dicter.setText("  Arreter" if on else "  Dicter ici")
+        # reapplique la feuille de style a ce bouton
+        self.btn_dicter.style().unpolish(self.btn_dicter)
+        self.btn_dicter.style().polish(self.btn_dicter)
 
     def copier(self):
         inject._ecrire_presse_papiers(self.zone.toPlainText())
@@ -224,6 +283,37 @@ class Panneau(QWidget):
         # Fermer le panneau ne quitte pas l'app : on le masque.
         e.ignore()
         self.hide()
+
+
+class Overlay(QWidget):
+    """Petite fenetre flottante pendant la dictee au curseur : montre que ca ecoute."""
+    def __init__(self):
+        super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setObjectName("overlayBox")
+        self.setStyleSheet(
+            "#overlayBox{background:#0c1420;border:1px solid #33c5f4;border-radius:12px;}")
+        self.setFixedWidth(260)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(16, 12, 16, 12)
+        v.setSpacing(7)
+        self.lbl = QLabel("Micro ouvert - parle, re-appuie pour ecrire")
+        self.lbl.setStyleSheet("color:#cfe3f2;font-size:11px;background:transparent;border:none;")
+        v.addWidget(self.lbl)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 100)
+        self.bar.setTextVisible(False)
+        self.bar.setFixedHeight(8)
+        v.addWidget(self.bar)
+
+    def placer(self):
+        try:
+            g = QApplication.primaryScreen().availableGeometry()
+            self.adjustSize()
+            self.move(g.center().x() - self.width() // 2, g.top() + 46)
+        except Exception:
+            pass
 
 
 class AppDictee(QObject):
@@ -252,6 +342,10 @@ class AppDictee(QObject):
         self.tray.show()
 
         self.panneau = Panneau(self)
+        self.overlay = Overlay()
+        self.timer_niveau = QTimer()
+        self.timer_niveau.setInterval(60)
+        self.timer_niveau.timeout.connect(self._maj_niveau)
 
         self.pont = Pont()
         self.pont.dictee_curseur.connect(self.toggle_dictee_curseur)
@@ -291,7 +385,7 @@ class AppDictee(QObject):
             self._arreter_et_traiter(cible="panneau")
         elif not self.enregistreur.en_cours:
             self._demarrer("panneau")
-            self.panneau.btn_dicter.setText("Arreter")
+            self.panneau.set_rec(True)
             self.panneau.lbl_etat.setText("Enregistrement...")
 
     def _demarrer(self, mode):
@@ -299,7 +393,7 @@ class AppDictee(QObject):
             self._premier_lancement()
             return
         try:
-            self.enregistreur.demarrer()
+            self.enregistreur.demarrer(self.cfg.get("peripherique_entree", ""))
         except Exception as e:
             self._erreur("Micro indisponible : " + str(e))
             return
@@ -307,15 +401,27 @@ class AppDictee(QObject):
         self.tray.setIcon(self.icone_rec)
         self.tray.setToolTip(APP_NOM + " - enregistrement...")
         _beep(True, self.cfg.get("beep", True))
+        self.timer_niveau.start()
+        if mode == "curseur":
+            self.overlay.placer()
+            self.overlay.show()
+
+    def _maj_niveau(self):
+        niv = int(self.enregistreur.niveau() * 100)
+        self.panneau.vumetre.setValue(niv)
+        self.overlay.bar.setValue(niv)
 
     def _arreter_et_traiter(self, cible):
         wav = self.enregistreur.arreter()
         self.mode = None
+        self.timer_niveau.stop()
+        self.panneau.vumetre.setValue(0)
+        self.overlay.hide()
         self.tray.setIcon(self.icone_idle)
         self.tray.setToolTip(APP_NOM)
         _beep(False, self.cfg.get("beep", True))
         if cible == "panneau":
-            self.panneau.btn_dicter.setText("Dicter ici")
+            self.panneau.set_rec(False)
             self.panneau.lbl_etat.setText("Transcription..." if wav else "Rien capte.")
         if not wav:
             return
@@ -336,6 +442,8 @@ class AppDictee(QObject):
     def _dictee_curseur_prete(self, texte: str):
         self.tray.setToolTip(APP_NOM)
         if not texte:
+            self.tray.showMessage(APP_NOM, "Rien entendu. Verifie le micro (Reglages).",
+                                  self.icone_idle, 3000)
             return
         if self.cfg.get("inserer_automatiquement", True):
             inject.coller_au_curseur(texte)
@@ -347,6 +455,7 @@ class AppDictee(QObject):
     def _dictee_panneau_prete(self, texte: str):
         self.panneau.lbl_etat.setText("")
         if not texte:
+            self.panneau.statut("Rien entendu. Verifie le micro (Reglages).")
             return
         cur = self.panneau.zone.toPlainText()
         self.panneau.zone.setPlainText((cur + (" " if cur and not cur.endswith("\n") else "") + texte).strip())
@@ -479,6 +588,8 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NOM)
     app.setQuitOnLastWindowClosed(False)
+    from . import theme
+    app.setStyleSheet(theme.QSS)
     _ = AppDictee(app)
     log.info("App demarree, en attente.")
     sys.exit(app.exec())
