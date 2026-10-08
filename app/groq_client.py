@@ -40,6 +40,23 @@ CONSIGNES = {
         "pertinent), en francais correct. Reponds UNIQUEMENT par le resume, "
         "sans guillemets ni commentaire."
     ),
+    "reformuler_mail": (
+        "Reformule le texte dicte suivant sous la forme d'un email professionnel "
+        "en francais, en vouvoyant, ton courtois et clair. Respecte EXACTEMENT "
+        "cette structure, avec une ligne vide entre chaque partie :\n"
+        "1) Salutation : si un prenom ou un nom de destinataire est mentionne "
+        "dans le texte, ecris 'Bonjour <Prenom>,' ; sinon ecris simplement "
+        "'Bonjour,'.\n"
+        "2) La phrase exacte : J'espère que vous allez bien.\n"
+        "3) Le corps du message, reformule proprement, en gardant le sens et "
+        "toutes les informations du texte dicte (ne rien inventer, ne rien "
+        "retirer d'important).\n"
+        "4) Termine TOUJOURS par la phrase exacte : Je reste à votre disposition "
+        "si besoin, excellente journée.\n"
+        "Separe les parties par des sauts de ligne. Reponds UNIQUEMENT par "
+        "l'email, sans objet, sans signature ajoutee, sans guillemets, sans "
+        "commentaire."
+    ),
 }
 
 

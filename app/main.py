@@ -250,6 +250,14 @@ class Panneau(QWidget):
             g.addWidget(b)
         v.addLayout(g)
 
+        # Reformuler la dictee en email (ouverture + corps + cloture types)
+        gmail = QHBoxLayout()
+        bmail = QPushButton("Reformuler en email")
+        bmail.setMinimumHeight(36)
+        bmail.clicked.connect(lambda _=False: self.appli.transformer_zone("reformuler_mail"))
+        gmail.addWidget(bmail)
+        v.addLayout(gmail)
+
         gl = QHBoxLayout()
         gl.setSpacing(8)
         self.instr = QLineEdit()
