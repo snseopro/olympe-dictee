@@ -81,7 +81,10 @@ def creer_raccourci_bureau() -> bool:
     if not est_gelee():
         return False
     lnk = chemin_raccourci_bureau()
-    exe = _exe()
+    # Toujours pointer vers l'exe du dossier d'install STABLE (c'est lui que la
+    # MAJ remplace), jamais sys.executable : sinon un lancement depuis une autre
+    # copie recreerait un raccourci vers une version qui ne sera pas mise a jour.
+    exe = chemin_install_exe() if os.path.isfile(chemin_install_exe()) else _exe()
     ps = (
         "$ws = New-Object -ComObject WScript.Shell; "
         f"$s = $ws.CreateShortcut('{lnk}'); "
@@ -117,8 +120,9 @@ def activer_autostart() -> bool:
         return False
     try:
         import winreg
+        exe = chemin_install_exe() if os.path.isfile(chemin_install_exe()) else _exe()
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
-            winreg.SetValueEx(k, APP_ID, 0, winreg.REG_SZ, f'"{_exe()}"')
+            winreg.SetValueEx(k, APP_ID, 0, winreg.REG_SZ, f'"{exe}"')
         log.info("Demarrage automatique active")
         return True
     except Exception as e:

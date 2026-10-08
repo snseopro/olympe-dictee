@@ -105,25 +105,52 @@ def telecharger_et_installer(man: dict, progres=None) -> bool:
     else:
         log.warning("Manifeste sans sha256 : integrite non verifiee.")
 
-    cible = sys.executable  # l'exe en cours
+    # Cible = l'exe du DOSSIER D'INSTALL STABLE (pas forcement sys.executable) :
+    # c'est lui que le raccourci bureau et l'autostart lancent. On remplace donc
+    # toujours CE fichier, pour qu'il n'y ait jamais une copie a jour et une
+    # copie peri­mee qui se desynchronisent.
+    from . import integration
+    cible = integration.chemin_install_exe() if integration.est_gelee() else sys.executable
+    log_maj = os.path.join(os.path.dirname(cible), "maj.log")
     pid = os.getpid()
-    # Script batch : attend la fermeture de l'app, remplace l'exe, relance.
+    # Script batch : attend la fermeture de l'app, REMPLACE l'exe avec RETRY
+    # (un .exe onefile reste verrouille quelques secondes apres la fermeture :
+    # sans retry le move echoue en silence et l'ANCIENNE version se relance ->
+    # boucle de mise a jour infinie). Tout est journalise dans maj.log.
     bat = tempfile.NamedTemporaryFile(prefix="olympe_dictee_maj_", suffix=".bat",
                                       delete=False, mode="w", encoding="ascii")
-    bat.write(
-        "@echo off\r\n"
-        "setlocal\r\n"
-        ":wait\r\n"
-        f'tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul\r\n'
-        "if not errorlevel 1 (\r\n"
-        "  timeout /t 1 /nobreak >nul\r\n"
-        "  goto wait\r\n"
-        ")\r\n"
-        "timeout /t 1 /nobreak >nul\r\n"
-        f'move /y "{chemin_tmp}" "{cible}" >nul\r\n'
-        f'start "" "{cible}"\r\n'
-        'del "%~f0"\r\n'
-    )
+    lignes = [
+        "@echo off",
+        "setlocal",
+        f'set "LOG={log_maj}"',
+        f'echo [%date% %time%] MAJ: attente fermeture PID {pid} >> "%LOG%"',
+        ":wait",
+        f'tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul',
+        "if not errorlevel 1 (",
+        "  timeout /t 1 /nobreak >nul",
+        "  goto wait",
+        ")",
+        'echo [%date% %time%] MAJ: app fermee, pause 2s >> "%LOG%"',
+        "timeout /t 2 /nobreak >nul",
+        "set /a n=0",
+        ":mv",
+        f'move /y "{chemin_tmp}" "{cible}" >> "%LOG%" 2>&1',
+        "if not errorlevel 1 goto ok",
+        "set /a n+=1",
+        'echo [%date% %time%] MAJ: move echec, tentative %n% >> "%LOG%"',
+        "if %n% geq 40 goto fail",
+        "timeout /t 1 /nobreak >nul",
+        "goto mv",
+        ":ok",
+        'echo [%date% %time%] MAJ: remplacement OK, relance >> "%LOG%"',
+        "goto run",
+        ":fail",
+        'echo [%date% %time%] MAJ: ECHEC remplacement apres 40 tentatives >> "%LOG%"',
+        ":run",
+        f'start "" "{cible}"',
+        'del "%~f0"',
+    ]
+    bat.write("\r\n".join(lignes) + "\r\n")
     bat.close()
     log.info("Lancement de l'updater, fermeture de l'app.")
     subprocess.Popen(["cmd", "/c", bat.name],

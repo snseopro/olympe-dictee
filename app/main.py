@@ -454,6 +454,11 @@ class AppDictee(QObject):
         lignes = [
             "=== DIAGNOSTIC Olympe Dictee v%s ===" % __version__,
             "Systeme    : %s" % platform.platform(),
+            "Exe lance  : %s" % sys.executable,
+            "Dossier MAJ: %s" % integration.chemin_install_exe(),
+            "Installe   : %s" % ("OUI (bon dossier)" if integration.est_installe()
+                                 else "NON - tourne hors du dossier d'install (risque de boucle MAJ)"),
+            "Raccourci  : %s" % integration.chemin_raccourci_bureau(),
             "Cle Groq   : %s" % ("presente" if self.cfg.get("groq_api_key") else "ABSENTE (-> Reglages)"),
             "Modele     : %s" % self.cfg.get("modele_texte"),
             "Raccourcis : dictee=%s (id=%s), panneau=%s (id=%s)" % (
